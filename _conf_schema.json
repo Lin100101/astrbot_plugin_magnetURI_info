@@ -1,0 +1,45 @@
+{
+  "astrbot_plugin_whatslinkInfo": {
+    "description": "插件配置",
+    "type": "object",
+    "hint": "可配置 API 超时、合并转发、截图显示，以及截图加噪以提高图片发送成功率",
+    "items": {
+      "timeout": {
+        "description": "请求 API 的超时时间（毫秒）",
+        "type": "int",
+        "hint": "默认 10000；设置为 0 表示不设置总超时（由运行环境控制）",
+        "default": 10000
+      },
+      "useForward": {
+        "description": "在 QQ/OneBot 平台使用合并转发发送结果",
+        "type": "bool",
+        "hint": "仅对 aiocqhttp/qq/qq_official/onebot 平台生效；开启可减少刷屏",
+        "default": true
+      },
+      "showScreenshot": {
+        "description": "是否在结果中显示资源截图",
+        "type": "bool",
+        "hint": "截图由 whatslink.info API 返回；关闭可减少消息体积",
+        "default": true
+      },
+      "noiseScreenshot": {
+        "description": "是否对截图进行轻微加噪后再发送",
+        "type": "bool",
+        "hint": "需要 Pillow（PIL）；若不可用或平台不支持以 bytes/base64/file 方式发送图片，将自动回退为 URL 图片发送",
+        "default": true
+      },
+      "noiseStrength": {
+        "description": "截图加噪强度",
+        "type": "int",
+        "hint": "取值范围 1-50；越大扰动越明显",
+        "default": 8
+      },
+      "noiseRatio": {
+        "description": "截图加噪比例",
+        "type": "float",
+        "hint": "取值范围 0-0.05；表示随机扰动像素占比，建议 0.001-0.005",
+        "default": 0.002
+      }
+    }
+  }
+}
