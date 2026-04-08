@@ -1,16 +1,20 @@
-
 <div align="center">
 
-# astrbot_plugin_whatslinkInfo
+# astrbot\_plugin\_magnetic\_link\_analysis
 
-_✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_  
+<br />
 
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
-[![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
+_✨_ _[astrbot](https://github.com/AstrBotDevs/AstrBot)_ _磁链解析插件 ✨_
+
+[!\[License\](https://img.shields.io/badge/License-MIT-green.svg null)](https://opensource.org/licenses/MIT)
+[!\[Python 3.10+\](https://img.shields.io/badge/Python-3.10%2B-blue.svg null)](https://www.python.org/)
+[!\[AstrBot\](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg null)](https://github.com/Soulter/AstrBot)
+
+![:name](https://count.getloli.com/@hajimihajimihajimi?name=hajimihajimihajimi&theme=moebooru&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
 </div>
 
+<br />
 
 一个[Astrbot](https://github.com/AstrBotDevs/AstrBot)插件，它能自动识别聊天中的磁力链接，并调用 [whatslink.info](https://whatslink.info/) 提供的 API 来生成包含资源详情和截图的预览消息。
 
@@ -26,7 +30,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
 ## 💿 安装
 
-在 AstrBot  插件市场搜索 `astrbot_plugin_whatslinkinfo` 并安装。
+在 AstrBot 插件市场搜索 `astrbot_plugin_magnetic_link_analysis` 并安装。
 
 ## 📖 使用方法
 
@@ -36,19 +40,18 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
 你可以在 AstrBot  的插件配置页面找到本插件的设置项。
 
-| 配置项           | 类型      | 默认值                               | 描述                                                               |
-| ---------------- | --------- | ------------------------------------ | ------------------------------------------------------------------ |
-| `timeout`        | `number`  | `10000`                              | 请求 API 的超时时间（毫秒）。                                      |
-| `useForward`     | `boolean` | `true`                               | 在 QQ/OneBot 平台使用合并转发的形式发送结果。                      |
-| `showScreenshot` | `boolean` | `true`                               | 是否在结果中显示资源截图。                                         |
-| `noiseScreenshot` | `boolean` | `true`                              | 是否对截图进行轻微加噪后再发送，以提高图片发送成功率（需 Pillow，且会自动回退）。 |
-| `noiseStrength`  | `number`  | `8`                                  | 截图加噪强度（1-50）。                                             |
-| `noiseRatio`     | `number`  | `0.002`                              | 截图加噪比例（0-0.05），表示随机扰动像素的占比。                   |
+| 配置项               | 类型        | 默认值     | 描述                                           |
+| ----------------- | --------- | ------- | -------------------------------------------- |
+| `timeout`         | `number`  | `10000` | 请求 API 的超时时间（毫秒）。                            |
+| `useForward`      | `boolean` | `true`  | 在 QQ/OneBot 平台使用合并转发的形式发送结果。                 |
+| `showScreenshot`  | `boolean` | `true`  | 是否在结果中显示资源截图。                                |
+| `noiseScreenshot` | `boolean` | `true`  | 是否对截图进行轻微加噪后再发送，以提高图片发送成功率（需 Pillow，且会自动回退）。 |
+| `noiseStrength`   | `number`  | `8`     | 截图加噪强度（1-50）。                                |
+| `noiseRatio`      | `number`  | `0.002` | 截图加噪比例（0-0.05），表示随机扰动像素的占比。                  |
 
 说明：
+
 - 截图加噪需要运行环境提供 `Pillow`（`PIL`）；若不可用或平台不支持以 bytes/base64/file 形式发送图片，将自动回退为直接发送截图 URL。
-
-
 
 ## 📜 免责声明
 

@@ -52,7 +52,7 @@ def _first_callable(obj, names: List[str]):
     return None
 
 
-@register("astrbot_plugin_whatslinkInfo", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
+@register("astrbot_plugin_magnetic_link_analysis", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
 class WhatslinkPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -206,7 +206,10 @@ class WhatslinkPlugin(Star):
 
         # 读取配置：从 AstrBot 全局配置的 plugin_settings 下读取本插件的配置
         cfg = self.context.get_config(umo=event.unified_msg_origin)
-        plugin_cfg = cfg.get("plugin_settings", {}).get("astrbot_plugin_whatslinkInfo", {})
+        plugin_settings = cfg.get("plugin_settings", {})
+        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
+        if plugin_cfg is None:
+            plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
         timeout = int(plugin_cfg.get("timeout", 10000))
         use_forward = bool(plugin_cfg.get("useForward", True))
         show_screenshot = bool(plugin_cfg.get("showScreenshot", True))

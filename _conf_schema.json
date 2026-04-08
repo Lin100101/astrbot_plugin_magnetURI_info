@@ -1,5 +1,5 @@
 {
-  "astrbot_plugin_whatslinkInfo": {
+  "astrbot_plugin_magnetic_link_analysis": {
     "description": "插件配置",
     "type": "object",
     "hint": "可配置 API 超时、合并转发、截图显示，以及截图加噪以提高图片发送成功率",
