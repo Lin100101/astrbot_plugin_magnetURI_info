@@ -39,6 +39,36 @@
         "type": "float",
         "hint": "取值范围 0-0.05；表示随机扰动像素占比，建议 0.001-0.005",
         "default": 0.002
+      },
+      "maxMagnetsPerMessage": {
+        "description": "单条消息最多解析的磁链数量",
+        "type": "int",
+        "hint": "默认 3；用于避免长消息触发大量外部请求",
+        "default": 3
+      },
+      "maxConcurrentRequests": {
+        "description": "外部请求并发上限",
+        "type": "int",
+        "hint": "默认 4；限制 API 请求与截图下载的并发，降低资源占用",
+        "default": 4
+      },
+      "rateLimitCount": {
+        "description": "限流额度（按磁链次数）",
+        "type": "int",
+        "hint": "默认 10；与 rateLimitWindowSec 配合使用，超限将提示稍后再试",
+        "default": 10
+      },
+      "rateLimitWindowSec": {
+        "description": "限流窗口（秒）",
+        "type": "float",
+        "hint": "默认 60；窗口内累计磁链次数超过 rateLimitCount 将被限流",
+        "default": 60
+      },
+      "screenshotHostAllowlist": {
+        "description": "截图域名白名单（可选）",
+        "type": "string",
+        "hint": "逗号分隔；为空表示不启用白名单，仅做 http/https 与私网/localhost 拦截",
+        "default": ""
       }
     }
   }

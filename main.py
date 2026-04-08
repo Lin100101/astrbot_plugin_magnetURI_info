@@ -9,11 +9,15 @@ AstrBot 插件：whatslink.info 磁链解析器
 from __future__ import annotations
 
 import base64
+import collections
 import io
+import ipaddress
 import os
 import random
 import re
 import tempfile
+import time
+import urllib.parse
 import aiohttp
 import asyncio
 from typing import List
@@ -25,7 +29,10 @@ from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image, Node, Nodes
 
 
-MAGNET_RE = re.compile(r"(magnet:\?xt=urn:btih:[A-Za-z0-9]+)", re.IGNORECASE)
+MAGNET_RE = re.compile(
+    r"(magnet:\?xt=urn:btih:(?:[A-Fa-f0-9]{40}|[A-Za-z2-7]{32})[^\s]*)",
+    re.IGNORECASE,
+)
 API_URL = "https://whatslink.info/api/v1/link"
 
 
@@ -52,15 +59,137 @@ def _first_callable(obj, names: List[str]):
     return None
 
 
+def _log_debug(msg: str):
+    try:
+        f = getattr(logger, "debug", None)
+        if callable(f):
+            f(msg)
+    except Exception:
+        return
+
+
 @register("astrbot_plugin_magnetic_link_analysis", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
 class WhatslinkPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         self.context = context
         self._tmp_files: List[str] = []
+        self._session: aiohttp.ClientSession | None = None
+        self._net_sem: asyncio.Semaphore | None = None
+        self._net_limit: int | None = None
+        self._rate: dict[str, collections.deque[float]] = {}
 
     async def initialize(self):
         """异步初始化（可选）"""
+        await self._ensure_session()
+
+    async def _ensure_session(self) -> aiohttp.ClientSession:
+        if self._session is not None and not self._session.closed:
+            return self._session
+        self._session = aiohttp.ClientSession(trust_env=True)
+        return self._session
+
+    def _ensure_net_semaphore(self, limit: int) -> asyncio.Semaphore:
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 4
+        if limit < 1:
+            limit = 1
+        if limit > 32:
+            limit = 32
+        if self._net_sem is None or self._net_limit != limit:
+            self._net_sem = asyncio.Semaphore(limit)
+            self._net_limit = limit
+        return self._net_sem
+
+    def _consume_rate(self, key: str, cost: int, limit: int, window_sec: float) -> bool:
+        try:
+            cost = int(cost)
+        except Exception:
+            cost = 1
+        if cost < 1:
+            cost = 1
+        try:
+            limit = int(limit)
+        except Exception:
+            limit = 10
+        if limit < 1:
+            limit = 1
+        try:
+            window_sec = float(window_sec)
+        except Exception:
+            window_sec = 60.0
+        if window_sec <= 0:
+            window_sec = 60.0
+
+        now = time.monotonic()
+        dq = self._rate.get(key)
+        if dq is None:
+            dq = collections.deque()
+            self._rate[key] = dq
+        while dq and now - dq[0] > window_sec:
+            dq.popleft()
+        if len(dq) + cost > limit:
+            return False
+        for _ in range(cost):
+            dq.append(now)
+        return True
+
+    def _parse_host_allowlist(self, s: str | None) -> set[str] | None:
+        if not s:
+            return None
+        hosts = set()
+        for part in str(s).split(","):
+            h = part.strip().lower()
+            if h:
+                hosts.add(h)
+        return hosts or None
+
+    def _is_safe_http_url(self, url: str, host_allowlist: set[str] | None = None) -> bool:
+        try:
+            p = urllib.parse.urlparse(url)
+        except Exception:
+            return False
+        scheme = (p.scheme or "").lower()
+        if scheme not in ("http", "https"):
+            return False
+        host = (p.hostname or "").strip().lower()
+        if not host:
+            return False
+        if host in ("localhost",) or host.endswith(".local"):
+            return False
+        if host_allowlist is not None:
+            if host not in host_allowlist and not any(host.endswith("." + h) for h in host_allowlist):
+                return False
+        try:
+            ip = ipaddress.ip_address(host)
+        except Exception:
+            return True
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return False
+        return True
+
+    def _cleanup_tmp_files_from(self, start_index: int):
+        if start_index < 0:
+            start_index = 0
+        new_files = self._tmp_files[start_index:]
+        if not new_files:
+            return
+        keep: List[str] = self._tmp_files[:start_index]
+        for p in new_files:
+            try:
+                os.remove(p)
+            except Exception:
+                keep.append(p)
+        self._tmp_files = keep
 
     def _build_image_from_bytes(self, data: bytes, suffix: str = ".png"):
         if not data:
@@ -71,7 +200,7 @@ class WhatslinkPlugin(Star):
             try:
                 return from_bytes(data)
             except Exception:
-                pass
+                _log_debug("Image.fromBytes 失败")
 
         from_base64 = _first_callable(Image, ["fromBase64", "from_base64"])
         if from_base64:
@@ -79,7 +208,7 @@ class WhatslinkPlugin(Star):
                 b64 = base64.b64encode(data).decode("ascii")
                 return from_base64(b64)
             except Exception:
-                pass
+                _log_debug("Image.fromBase64 失败")
 
         from_file = _first_callable(Image, ["fromFile", "from_file", "fromPath", "from_path"])
         if from_file:
@@ -91,19 +220,23 @@ class WhatslinkPlugin(Star):
                 self._tmp_files.append(path)
                 return from_file(path)
             except Exception:
-                pass
+                logger.warning("创建临时截图文件失败")
+                return None
 
         return None
 
     async def _fetch_bytes(self, url: str, timeout_ms: int = 10000) -> bytes | None:
+        session = await self._ensure_session()
+        sem = self._ensure_net_semaphore(self._net_limit or 4)
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000 if timeout_ms else None)
         try:
-            async with aiohttp.ClientSession(trust_env=True) as session:
+            async with sem:
                 async with session.get(url, timeout=timeout) as resp:
                     if resp.status != 200:
                         return None
                     return await resp.read()
-        except Exception:
+        except Exception as e:
+            _log_debug(f"下载截图失败: {type(e).__name__}")
             return None
 
     def _add_noise_to_image_bytes(self, data: bytes, strength: int, ratio: float) -> bytes | None:
@@ -145,7 +278,12 @@ class WhatslinkPlugin(Star):
         enable_noise: bool,
         noise_strength: int,
         noise_ratio: float,
+        host_allowlist: set[str] | None = None,
     ):
+        if not self._is_safe_http_url(url, host_allowlist=host_allowlist):
+            logger.warning("截图 URL 被拦截（不安全）")
+            return None
+
         if not enable_noise:
             return Image.fromURL(url)
 
@@ -170,10 +308,12 @@ class WhatslinkPlugin(Star):
 
     async def _call_api(self, url: str, timeout_ms: int = 10000) -> dict | None:
         """调用 whatslink.info API 并返回 JSON，失败返回 None。"""
+        session = await self._ensure_session()
+        sem = self._ensure_net_semaphore(self._net_limit or 4)
         q = {"url": url}
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000 if timeout_ms else None)
         try:
-            async with aiohttp.ClientSession(trust_env=True) as session:
+            async with sem:
                 async with session.get(API_URL, params=q, timeout=timeout) as resp:
                     if resp.status != 200:
                         logger.error(f"whatslink.info 返回状态码: {resp.status}")
@@ -208,12 +348,47 @@ class WhatslinkPlugin(Star):
         cfg = self.context.get_config(umo=event.unified_msg_origin)
         plugin_settings = cfg.get("plugin_settings", {})
         plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
-        if plugin_cfg is None:
+        if not isinstance(plugin_cfg, dict):
             plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
-        timeout = int(plugin_cfg.get("timeout", 10000))
+        if not isinstance(plugin_cfg, dict):
+            plugin_cfg = {}
+        try:
+            timeout = int(plugin_cfg.get("timeout", 10000))
+        except Exception:
+            timeout = 10000
         use_forward = bool(plugin_cfg.get("useForward", True))
         show_screenshot = bool(plugin_cfg.get("showScreenshot", True))
         noise_screenshot = bool(plugin_cfg.get("noiseScreenshot", True))
+        try:
+            max_magnets = int(plugin_cfg.get("maxMagnetsPerMessage", 3))
+        except Exception:
+            max_magnets = 3
+        if max_magnets < 1:
+            max_magnets = 1
+        if max_magnets > 20:
+            max_magnets = 20
+        magnets = magnets[:max_magnets]
+        try:
+            max_concurrent = int(plugin_cfg.get("maxConcurrentRequests", 4))
+        except Exception:
+            max_concurrent = 4
+        self._ensure_net_semaphore(max_concurrent)
+        try:
+            rate_limit = int(plugin_cfg.get("rateLimitCount", 10))
+        except Exception:
+            rate_limit = 10
+        try:
+            rate_window = float(plugin_cfg.get("rateLimitWindowSec", 60))
+        except Exception:
+            rate_window = 60.0
+        host_allowlist = self._parse_host_allowlist(plugin_cfg.get("screenshotHostAllowlist"))
+        rate_key = f"{event.get_platform_name()}:{event.get_sender_id()}"
+        if not self._consume_rate(rate_key, cost=len(magnets), limit=rate_limit, window_sec=rate_window):
+            try:
+                yield event.plain_result("请求过于频繁，请稍后再试")
+            except Exception:
+                pass
+            return
         try:
             noise_strength = int(plugin_cfg.get("noiseStrength", 8))
         except Exception:
@@ -235,87 +410,87 @@ class WhatslinkPlugin(Star):
         try:
             yield event.plain_result("解析磁链中...")
         except Exception:
-            # 发送失败不影响主流程
-            pass
+            _log_debug("发送“解析中”提示失败")
 
+        tmp_start = len(self._tmp_files)
         results_to_send: List[MessageEventResult] = []
 
-        for m in magnets:
-            api_ret = await self._call_api(m, timeout_ms=timeout)
-            if not api_ret:
-                # 请求失败
-                r = MessageEventResult().message(f"解析失败: {m}")
-                results_to_send.append(r)
-                continue
+        try:
+            for m in magnets:
+                api_ret = await self._call_api(m, timeout_ms=timeout)
+                if not api_ret:
+                    r = MessageEventResult().message(f"解析失败: {m}")
+                    results_to_send.append(r)
+                    continue
 
-            # 解析响应字段，按 API 文档处理
-            err = api_ret.get("error") or ""
-            if err:
-                results_to_send.append(MessageEventResult().message(f"解析失败: {err}"))
-                continue
+                err = api_ret.get("error") or ""
+                if err:
+                    results_to_send.append(MessageEventResult().message(f"解析失败: {err}"))
+                    continue
 
-            name = api_ret.get("name", "未知名称")
-            size = api_ret.get("size")
-            count = api_ret.get("count")
-            file_type = api_ret.get("file_type", api_ret.get("type", ""))
-            screenshots = api_ret.get("screenshots", []) or []
+                name = api_ret.get("name", "未知名称")
+                size = api_ret.get("size")
+                count = api_ret.get("count")
+                screenshots = api_ret.get("screenshots", []) or []
 
-            # 构建要显示的文本：要求不展示类型和来源，仅显示名称、文件数量与总大小
-            header = f"名称: {name}\n文件数量: {count}\n总大小: {size} ({_human_readable_size(size)})\n"
+                header = f"名称: {name}\n文件数量: {count}\n总大小: {size} ({_human_readable_size(size)})\n"
 
-            # 如果需要显示截图，准备所有截图 URL 列表（按 API 返回顺序）。
-            shots: List[str] = []
-            if show_screenshot and isinstance(screenshots, list) and len(screenshots) > 0:
-                for s in screenshots:
-                    url = s.get("screenshot")
-                    if url:
-                        shots.append(url)
+                shots: List[str] = []
+                if show_screenshot and isinstance(screenshots, list) and len(screenshots) > 0:
+                    for s in screenshots:
+                        url = s.get("screenshot")
+                        if url:
+                            shots.append(url)
 
-            # 构造 MessageEventResult
-            if use_forward and event.get_platform_name() in ("aiocqhttp", "qq", "qq_official", "onebot"):
-                # 对于 QQ/OneBot 平台，使用合并转发（Nodes）以避免刷屏。
-                # Node 内容是一个消息链（列表），此处仅放入文本和可能的图片
-                content = [Plain(header)]
-                # 将所有截图附加为图片段
-                for url in shots:
-                    content.append(
-                        await self._make_screenshot_component(
+                if use_forward and event.get_platform_name() in ("aiocqhttp", "qq", "qq_official", "onebot"):
+                    content = [Plain(header)]
+                    for url in shots:
+                        comp = await self._make_screenshot_component(
                             url=url,
                             timeout_ms=timeout,
                             enable_noise=noise_screenshot,
                             noise_strength=noise_strength,
                             noise_ratio=noise_ratio,
+                            host_allowlist=host_allowlist,
                         )
-                    )
-                node = Node(content=content, name=event.get_sender_name(), uin=str(event.get_sender_id()))
-                nodes = Nodes(nodes=[node])
-                mer = MessageEventResult()
-                mer.chain = [nodes]
-                results_to_send.append(mer)
-            else:
-                # 普通平台或不开启合并转发，直接发送文本 + 图片
-                mer = MessageEventResult().message(header)
-                for url in shots:
-                    mer.chain.append(
-                        await self._make_screenshot_component(
+                        if comp is not None:
+                            content.append(comp)
+                    node = Node(content=content, name=event.get_sender_name(), uin=str(event.get_sender_id()))
+                    nodes = Nodes(nodes=[node])
+                    mer = MessageEventResult()
+                    mer.chain = [nodes]
+                    results_to_send.append(mer)
+                else:
+                    mer = MessageEventResult().message(header)
+                    for url in shots:
+                        comp = await self._make_screenshot_component(
                             url=url,
                             timeout_ms=timeout,
                             enable_noise=noise_screenshot,
                             noise_strength=noise_strength,
                             noise_ratio=noise_ratio,
+                            host_allowlist=host_allowlist,
                         )
-                    )
-                results_to_send.append(mer)
+                        if comp is not None:
+                            mer.chain.append(comp)
+                    results_to_send.append(mer)
 
-        # 逐条发送解析结果。使用 context.send_message 主动发送，避免影响当前事件的传播控制。
-        for r in results_to_send:
-            try:
-                await self.context.send_message(event.unified_msg_origin, r)
-            except Exception as e:
-                logger.error(f"发送解析结果失败: {e}")
+            for r in results_to_send:
+                try:
+                    await self.context.send_message(event.unified_msg_origin, r)
+                except Exception as e:
+                    logger.error(f"发送解析结果失败: {e}")
+        finally:
+            self._cleanup_tmp_files_from(tmp_start)
 
     async def terminate(self):
         """插件被卸载/停用时调用（可选）"""
+        if self._session is not None:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+            self._session = None
         for p in self._tmp_files:
             try:
                 os.remove(p)

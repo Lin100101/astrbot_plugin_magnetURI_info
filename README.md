@@ -48,6 +48,11 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 | `noiseScreenshot` | `boolean` | `true`  | 是否对截图进行轻微加噪后再发送，以提高图片发送成功率（需 Pillow，且会自动回退）。 |
 | `noiseStrength`   | `number`  | `8`     | 截图加噪强度（1-50）。                                |
 | `noiseRatio`      | `number`  | `0.002` | 截图加噪比例（0-0.05），表示随机扰动像素的占比。                  |
+| `maxMagnetsPerMessage` | `number` | `3` | 单条消息最多解析的磁链数量，用于避免长消息触发大量外部请求。 |
+| `maxConcurrentRequests` | `number` | `4` | 外部请求并发上限（API 请求与截图下载）。 |
+| `rateLimitCount` | `number` | `10` | 限流额度（按磁链次数），与 `rateLimitWindowSec` 配合使用。 |
+| `rateLimitWindowSec` | `number` | `60` | 限流窗口（秒），窗口内累计磁链次数超过 `rateLimitCount` 将被限流。 |
+| `screenshotHostAllowlist` | `string` | `""` | 截图域名白名单（逗号分隔，可选）；为空仅做 http/https 与私网/localhost 拦截。 |
 
 说明：
 
