@@ -1,14 +1,14 @@
 <div align="center">
 
-# astrbot\_plugin\_magnetic\_link\_analysis
+# astrbot_plugin_magnetic_link_analysis
 
 <br />
 
-_✨_ _[astrbot](https://github.com/AstrBotDevs/AstrBot)_ _磁链解析插件 ✨_
+_✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
-[!\[License\](https://img.shields.io/badge/License-MIT-green.svg null)](https://opensource.org/licenses/MIT)
-[!\[Python 3.10+\](https://img.shields.io/badge/Python-3.10%2B-blue.svg null)](https://www.python.org/)
-[!\[AstrBot\](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg null)](https://github.com/Soulter/AstrBot)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
 
 ![:name](https://count.getloli.com/@hajimihajimihajimi?name=hajimihajimihajimi&theme=moebooru&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
