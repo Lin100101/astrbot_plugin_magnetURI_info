@@ -6,7 +6,7 @@
 
 _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
 
@@ -53,6 +53,12 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 | `rateLimitCount` | `number` | `10` | 限流额度（按磁链次数），与 `rateLimitWindowSec` 配合使用。 |
 | `rateLimitWindowSec` | `number` | `60` | 限流窗口（秒），窗口内累计磁链次数超过 `rateLimitCount` 将被限流。 |
 | `screenshotHostAllowlist` | `string` | `""` | 截图域名白名单（逗号分隔，可选）；为空仅做 http/https 与私网/localhost 拦截。 |
+| `maxScreenshotsPerMagnet` | `number` | `3` | 每个磁链最多发送的截图数量；设置为 `0` 表示不发送截图。 |
+| `maxScreenshotBytes` | `number` | `8388608` | 单张截图下载大小上限（字节），用于避免下载超大响应导致内存压力。 |
+| `maxScreenshotRedirects` | `number` | `3` | 截图下载最大重定向次数；每次跳转都会重新做 URL 安全校验。 |
+| `maxScreenshotPixels` | `number` | `20000000` | 截图像素上限（用于加噪安全保护），超过将跳过加噪并回退为 URL 图片发送。 |
+| `requestRetries` | `number` | `1` | 网络请求重试次数（对超时/连接错误/5xx 进行轻量重试）。 |
+| `requestRetryBaseDelayMs` | `number` | `200` | 重试基础退避延迟（毫秒），实际延迟含指数退避与随机抖动。 |
 
 说明：
 

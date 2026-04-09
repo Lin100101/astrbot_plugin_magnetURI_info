@@ -69,6 +69,42 @@
         "type": "string",
         "hint": "逗号分隔；为空表示不启用白名单，仅做 http/https 与私网/localhost 拦截",
         "default": ""
+      },
+      "maxScreenshotsPerMagnet": {
+        "description": "每个磁链最多发送的截图数量",
+        "type": "int",
+        "hint": "默认 3；设置为 0 表示不发送截图（等同于关闭 showScreenshot）",
+        "default": 3
+      },
+      "maxScreenshotBytes": {
+        "description": "单张截图下载大小上限（字节）",
+        "type": "int",
+        "hint": "默认 8388608（8MB）；用于避免下载超大响应导致内存压力",
+        "default": 8388608
+      },
+      "maxScreenshotRedirects": {
+        "description": "截图下载最大重定向次数",
+        "type": "int",
+        "hint": "默认 3；每次跳转都会重新做 URL 安全校验",
+        "default": 3
+      },
+      "maxScreenshotPixels": {
+        "description": "截图像素上限（用于加噪安全保护）",
+        "type": "int",
+        "hint": "默认 20000000；超过将跳过加噪并回退为 URL 图片发送",
+        "default": 20000000
+      },
+      "requestRetries": {
+        "description": "网络请求重试次数",
+        "type": "int",
+        "hint": "默认 1；对超时/连接错误/5xx 进行轻量重试（指数退避）",
+        "default": 1
+      },
+      "requestRetryBaseDelayMs": {
+        "description": "重试基础退避延迟（毫秒）",
+        "type": "int",
+        "hint": "默认 200；实际延迟为 baseDelay * 2^attempt + 随机抖动",
+        "default": 200
       }
     }
   }
