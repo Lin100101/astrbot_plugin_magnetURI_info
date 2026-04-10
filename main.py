@@ -20,7 +20,10 @@ import time
 import urllib.parse
 import aiohttp
 import asyncio
-from typing import List
+import hashlib
+from typing import List, Optional, Dict
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.core.message.message_event_result import MessageEventResult
@@ -67,6 +70,187 @@ def _log_debug(msg: str):
     except Exception:
         return
 
+@dataclass
+class CacheEntry:
+    data: dict | bytes
+    timestamp: datetime
+    hit_count: int = 0
+
+class SmartCache:
+    def __init__(self, default_ttl: int = 300, max_size: int = 1000):
+        self._cache: Dict[str, CacheEntry] = {}
+        self._default_ttl = default_ttl
+        self._max_size = max_size
+        self._hits = 0
+        self._misses = 0
+    
+    def _generate_key(self, url_or_magnet: str) -> str:
+        match = re.search(r'urn:btih:([A-Za-z0-9]{32,40})', url_or_magnet, re.IGNORECASE)
+        if match:
+            return match.group(1).lower()
+        return hashlib.md5(url_or_magnet.encode()).hexdigest()
+    
+    def get(self, key_str: str) -> Optional[dict | bytes]:
+        key = self._generate_key(key_str)
+        entry = self._cache.get(key)
+        
+        if entry and datetime.now() - entry.timestamp < timedelta(seconds=self._default_ttl):
+            entry.hit_count += 1
+            self._hits += 1
+            return entry.data
+        
+        if entry:
+            del self._cache[key]
+            
+        self._misses += 1
+        return None
+    
+    def set(self, key_str: str, data: dict | bytes):
+        key = self._generate_key(key_str)
+        
+        if len(self._cache) >= self._max_size and key not in self._cache:
+            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
+            del self._cache[oldest_key]
+        
+        self._cache[key] = CacheEntry(data=data, timestamp=datetime.now())
+
+class RetryManager:
+    def __init__(self):
+        self.failure_counts = {}
+        self.circuit_breakers = {}
+    
+    async def execute_with_retry(
+        self, 
+        func, 
+        *args,
+        max_retries: int = 2,
+        base_delay: float = 0.2,
+        max_delay: float = 2.0,
+        key: str = "default",
+        **kwargs
+    ):
+        if self._is_circuit_open(key):
+            raise Exception(f"Circuit breaker open for {key}")
+        
+        for attempt in range(max_retries + 1):
+            try:
+                result = await func(*args, **kwargs)
+                
+                if key in self.failure_counts:
+                    del self.failure_counts[key]
+                
+                return result
+                
+            except Exception as e:
+                self.failure_counts[key] = self.failure_counts.get(key, 0) + 1
+                
+                if self.failure_counts[key] >= 5:
+                    self._open_circuit(key)
+                
+                if attempt == max_retries:
+                    raise e
+                
+                delay = min(base_delay * (2 ** attempt), max_delay)
+                delay += random.uniform(0, delay * 0.1)
+                
+                logger.warning(f"请求失败，{delay:.2f}秒后重试 (attempt {attempt + 1})")
+                await asyncio.sleep(delay)
+    
+    def _is_circuit_open(self, key: str) -> bool:
+        if key not in self.circuit_breakers:
+            return False
+        
+        open_time, timeout = self.circuit_breakers[key]
+        if datetime.now() - open_time > timedelta(seconds=timeout):
+            del self.circuit_breakers[key]
+            return False
+        
+        return True
+    
+    def _open_circuit(self, key: str, timeout: int = 60):
+        self.circuit_breakers[key] = (datetime.now(), timeout)
+        logger.error(f"熔断器开启 for {key}, timeout: {timeout}s")
+
+class _SafeResolver(aiohttp.DefaultResolver):
+    def __init__(self, host_allowlist: set[str] | None = None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.host_allowlist = host_allowlist
+
+    async def resolve(self, host: str, port: int, family: int = 0) -> list[dict]:
+        host_lower = host.lower()
+        if host_lower in ("localhost",) or host_lower.endswith(".local"):
+            raise OSError(f"Refused to resolve private host: {host}")
+        
+        if self.host_allowlist is not None:
+            if host_lower not in self.host_allowlist and not any(host_lower.endswith("." + h) for h in self.host_allowlist):
+                raise OSError(f"Host not in allowlist: {host}")
+
+        ips = await super().resolve(host, port, family)
+        
+        for info in ips:
+            try:
+                ip_str = info.get("host")
+                if not ip_str:
+                    continue
+                ip_obj = ipaddress.ip_address(ip_str)
+                if (
+                    ip_obj.is_private
+                    or ip_obj.is_loopback
+                    or ip_obj.is_link_local
+                    or ip_obj.is_multicast
+                    or ip_obj.is_reserved
+                    or ip_obj.is_unspecified
+                ):
+                    raise OSError(f"Resolved to private IP: {ip_str}")
+            except ValueError:
+                pass
+        return ips
+
+class PerformanceMonitor:
+    def __init__(self):
+        self.metrics = {
+            'api_calls': 0,
+            'api_errors': 0,
+            'screenshot_downloads': 0,
+            'total_response_time': 0.0,
+            'cache_hits': 0,
+            'cache_misses': 0,
+            'start_time': datetime.now()
+        }
+        self._lock = asyncio.Lock()
+    
+    async def record_api_call(self, duration: float, success: bool):
+        async with self._lock:
+            self.metrics['api_calls'] += 1
+            self.metrics['total_response_time'] += duration
+            if not success:
+                self.metrics['api_errors'] += 1
+    
+    async def record_cache_operation(self, hit: bool):
+        async with self._lock:
+            if hit:
+                self.metrics['cache_hits'] += 1
+            else:
+                self.metrics['cache_misses'] += 1
+    
+    async def record_screenshot_download(self):
+        async with self._lock:
+            self.metrics['screenshot_downloads'] += 1
+
+    def get_stats(self) -> dict:
+        total_requests = self.metrics['api_calls']
+        avg_response_time = (self.metrics['total_response_time'] / max(1, total_requests))
+        total_cache_ops = self.metrics['cache_hits'] + self.metrics['cache_misses']
+        cache_hit_rate = self.metrics['cache_hits'] / max(1, total_cache_ops)
+        
+        return {
+            'total_api_calls': total_requests,
+            'api_error_rate': self.metrics['api_errors'] / max(1, total_requests),
+            'avg_response_time_ms': avg_response_time * 1000,
+            'cache_hit_rate': cache_hit_rate,
+            'screenshot_downloads': self.metrics['screenshot_downloads'],
+            'uptime_hours': (datetime.now() - self.metrics['start_time']).total_seconds() / 3600
+        }
 
 @register("astrbot_plugin_magnetic_link_analysis", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
 class WhatslinkPlugin(Star):
@@ -78,7 +262,12 @@ class WhatslinkPlugin(Star):
         self._net_sem: asyncio.Semaphore | None = None
         self._net_limit: int | None = None
         self._rate: dict[str, collections.deque[float]] = {}
+        self._rate_limits: dict[str, tuple[int, float]] = {}
         self._last_rate_cleanup: float = 0.0
+        self._api_cache = SmartCache(default_ttl=300, max_size=1000)
+        self._screenshot_cache = SmartCache(default_ttl=600, max_size=500)
+        self._retry_manager = RetryManager()
+        self._monitor = PerformanceMonitor()
 
     async def initialize(self):
         """异步初始化（可选）"""
@@ -87,7 +276,31 @@ class WhatslinkPlugin(Star):
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is not None and not self._session.closed:
             return self._session
-        self._session = aiohttp.ClientSession(trust_env=True)
+            
+        connector = aiohttp.TCPConnector(
+            limit=100,              
+            limit_per_host=30,      
+            ttl_dns_cache=300,      
+            keepalive_timeout=30,   
+            use_dns_cache=True,     
+            enable_cleanup_closed=True,  
+        )
+        timeout = aiohttp.ClientTimeout(
+            total=30,               
+            connect=10,             
+            sock_read=20            
+        )
+        self._session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            trust_env=False,        
+            headers={
+                'User-Agent': 'AstrBot-MagnetParser/1.0',
+                'Accept': 'application/json, text/plain;q=0.9',
+                'Accept-Encoding': 'gzip, deflate',
+                'Connection': 'keep-alive',
+            }
+        )
         return self._session
 
     def _ensure_net_semaphore(self, limit: int) -> asyncio.Semaphore:
@@ -99,7 +312,7 @@ class WhatslinkPlugin(Star):
             limit = 1
         if limit > 32:
             limit = 32
-        if self._net_sem is None:
+        if self._net_sem is None or self._net_limit != limit:
             self._net_sem = asyncio.Semaphore(limit)
             self._net_limit = limit
         return self._net_sem
@@ -126,16 +339,23 @@ class WhatslinkPlugin(Star):
 
         now = time.monotonic()
 
+        if key not in self._rate_limits:
+            self._rate_limits[key] = (limit, window_sec)
+        else:
+            limit, window_sec = self._rate_limits[key]
+
         if now - self._last_rate_cleanup > 60.0:
             self._last_rate_cleanup = now
             keys_to_remove = []
             for k, dq_item in self._rate.items():
-                while dq_item and now - dq_item[0] > window_sec:
+                _, k_window_sec = self._rate_limits.get(k, (10, 60.0))
+                while dq_item and now - dq_item[0] > k_window_sec:
                     dq_item.popleft()
                 if not dq_item:
                     keys_to_remove.append(k)
             for k in keys_to_remove:
                 self._rate.pop(k, None)
+                self._rate_limits.pop(k, None)
 
         dq = self._rate.get(key)
         if dq is None:
@@ -244,6 +464,7 @@ class WhatslinkPlugin(Star):
             try:
                 fd, path = tempfile.mkstemp(prefix="astrbot_whatslink_", suffix=suffix)
                 os.close(fd)
+                os.chmod(path, 0o600)
                 with open(path, "wb") as f:
                     f.write(data)
                 self._tmp_files.append(path)
@@ -283,119 +504,140 @@ class WhatslinkPlugin(Star):
         retries: int = 1,
         retry_base_delay_ms: int = 200,
     ) -> bytes | None:
-        session = await self._ensure_session()
         sem = self._ensure_net_semaphore(self._net_limit or 4)
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000 if timeout_ms else None)
-        try:
-            max_bytes = int(max_bytes)
-        except Exception:
-            max_bytes = 8 * 1024 * 1024
-        if max_bytes < 64 * 1024:
-            max_bytes = 64 * 1024
-        if max_bytes > 50 * 1024 * 1024:
-            max_bytes = 50 * 1024 * 1024
-        try:
-            max_redirects = int(max_redirects)
-        except Exception:
-            max_redirects = 3
-        if max_redirects < 0:
-            max_redirects = 0
-        if max_redirects > 10:
-            max_redirects = 10
-        try:
-            retries = int(retries)
-        except Exception:
-            retries = 1
-        if retries < 0:
-            retries = 0
-        if retries > 2:
-            retries = 2
-
-        for attempt in range(retries + 1):
-            cur_url = url
+        
+        resolver = _SafeResolver(host_allowlist=host_allowlist)
+        connector = aiohttp.TCPConnector(resolver=resolver)
+        async with aiohttp.ClientSession(connector=connector, trust_env=True) as safe_session:
             try:
-                for _ in range(max_redirects + 1):
-                    if not await self._is_safe_http_url(cur_url, host_allowlist=host_allowlist):
-                        return None
-                    async with sem:
-                        async with session.get(cur_url, timeout=timeout, allow_redirects=False) as resp:
-                            if resp.status in (301, 302, 303, 307, 308):
-                                loc = resp.headers.get("Location")
-                                if not loc:
-                                    return None
-                                cur_url = urllib.parse.urljoin(cur_url, loc)
-                                continue
-                            if resp.status == 200:
-                                cl = resp.headers.get("Content-Length")
-                                if cl:
-                                    try:
-                                        if int(cl) > max_bytes:
-                                            return None
-                                    except Exception:
-                                        pass
-                                buf = bytearray()
-                                async for chunk in resp.content.iter_chunked(64 * 1024):
-                                    if not chunk:
-                                        continue
-                                    buf.extend(chunk)
-                                    if len(buf) > max_bytes:
-                                        return None
-                                return bytes(buf)
-                            if 500 <= resp.status <= 599:
-                                break
-                            return None
-            except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                _log_debug(f"下载截图失败: {type(e).__name__}")
-            except Exception as e:
-                _log_debug(f"下载截图失败: {type(e).__name__}")
-                return None
+                max_bytes = int(max_bytes)
+            except Exception:
+                max_bytes = 8 * 1024 * 1024
+            if max_bytes < 64 * 1024:
+                max_bytes = 64 * 1024
+            if max_bytes > 50 * 1024 * 1024:
+                max_bytes = 50 * 1024 * 1024
+            try:
+                max_redirects = int(max_redirects)
+            except Exception:
+                max_redirects = 3
+            if max_redirects < 0:
+                max_redirects = 0
+            if max_redirects > 10:
+                max_redirects = 10
+            try:
+                retries = int(retries)
+            except Exception:
+                retries = 1
+            if retries < 0:
+                retries = 0
+            if retries > 2:
+                retries = 2
 
-            if attempt < retries:
-                await self._sleep_backoff(attempt, base_delay_ms=retry_base_delay_ms)
+            for attempt in range(retries + 1):
+                cur_url = url
+                try:
+                    for _ in range(max_redirects + 1):
+                        p = urllib.parse.urlparse(cur_url)
+                        if (p.scheme or "").lower() not in ("http", "https"):
+                            return None
+                        async with sem:
+                            async with safe_session.get(cur_url, timeout=timeout, allow_redirects=False) as resp:
+                                if resp.status in (301, 302, 303, 307, 308):
+                                    loc = resp.headers.get("Location")
+                                    if not loc:
+                                        return None
+                                    cur_url = urllib.parse.urljoin(cur_url, loc)
+                                    continue
+                                if resp.status == 200:
+                                    cl = resp.headers.get("Content-Length")
+                                    if cl:
+                                        try:
+                                            if int(cl) > max_bytes:
+                                                return None
+                                        except Exception:
+                                            pass
+                                    buf = bytearray()
+                                    async for chunk in resp.content.iter_chunked(64 * 1024):
+                                        if not chunk:
+                                            continue
+                                        buf.extend(chunk)
+                                        if len(buf) > max_bytes:
+                                            return None
+                                    return bytes(buf)
+                                if 500 <= resp.status <= 599:
+                                    break
+                                return None
+                except (asyncio.TimeoutError, aiohttp.ClientError, OSError) as e:
+                    _log_debug(f"下载截图失败: {type(e).__name__}")
+                except Exception as e:
+                    _log_debug(f"下载截图失败: {type(e).__name__}")
+                    return None
+
+                if attempt < retries:
+                    await self._sleep_backoff(attempt, base_delay_ms=retry_base_delay_ms)
 
         return None
 
-    def _add_noise_to_image_bytes(self, data: bytes, strength: int, ratio: float, max_pixels: int) -> bytes | None:
-        try:
-            from PIL import Image as PILImage
-        except Exception:
-            return None
-        DecompressionBombError = getattr(PILImage, "DecompressionBombError", None)
-
-        try:
-            img = PILImage.open(io.BytesIO(data))
-            w, h = img.size
-            if w <= 0 or h <= 0:
-                return None
+    async def _add_noise_to_image_bytes(self, data: bytes, strength: int, ratio: float, max_pixels: int) -> bytes | None:
+        def _process():
             try:
-                max_pixels = int(max_pixels)
+                from PIL import Image as PILImage
+                from PIL import ImageFile
             except Exception:
-                max_pixels = 20_000_000
-            if max_pixels > 0 and w * h > max_pixels:
                 return None
-            img.load()
-            img = img.convert("RGB")
-            n = int(w * h * ratio)
-            if n < 1:
-                n = 1
-            px = img.load()
-            for _ in range(n):
-                x = random.randrange(w)
-                y = random.randrange(h)
-                r, g, b = px[x, y]
-                r = max(0, min(255, r + random.randint(-strength, strength)))
-                g = max(0, min(255, g + random.randint(-strength, strength)))
-                b = max(0, min(255, b + random.randint(-strength, strength)))
-                px[x, y] = (r, g, b)
-            out = io.BytesIO()
-            img.save(out, format="PNG", optimize=True)
-            return out.getvalue()
-        except Exception as e:
-            if DecompressionBombError is not None and isinstance(e, DecompressionBombError):
-                logger.warning("截图加噪失败: 图片像素过大")
+            DecompressionBombError = getattr(PILImage, "DecompressionBombError", None)
+
+            try:
+                try:
+                    mp = int(max_pixels)
+                except Exception:
+                    mp = 20_000_000
+                
+                ImageFile.LOAD_TRUNCATED_IMAGES = False
+                if mp > 0:
+                    PILImage.MAX_IMAGE_PIXELS = mp
+                
+                with io.BytesIO(data) as bio:
+                    with PILImage.open(bio) as img:
+                        w, h = img.size
+                        if w <= 0 or h <= 0:
+                            return None
+                        if mp > 0 and w * h > mp:
+                            return None
+                        
+                        if img.format not in ['JPEG', 'PNG', 'WEBP']:
+                            return None
+                            
+                        img.load()
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                            
+                        n = int(w * h * ratio)
+                        if n < 1:
+                            n = 1
+                        px = img.load()
+                        for _ in range(n):
+                            x = random.randrange(w)
+                            y = random.randrange(h)
+                            r, g, b = px[x, y]
+                            r = max(0, min(255, r + random.randint(-strength, strength)))
+                            g = max(0, min(255, g + random.randint(-strength, strength)))
+                            b = max(0, min(255, b + random.randint(-strength, strength)))
+                            px[x, y] = (r, g, b)
+                            
+                        out = io.BytesIO()
+                        img.save(out, format="PNG", optimize=True)
+                        return out.getvalue()
+            except Exception as e:
+                if DecompressionBombError is not None and isinstance(e, DecompressionBombError):
+                    logger.warning("截图加噪失败: 图片像素过大")
+                    return None
+                logger.warning(f"截图加噪失败: {e}")
                 return None
-            logger.warning(f"截图加噪失败: {e}")
-            return None
+        
+        return await asyncio.to_thread(_process)
 
     async def _make_screenshot_component(
         self,
@@ -411,24 +653,30 @@ class WhatslinkPlugin(Star):
         retries: int = 1,
         retry_base_delay_ms: int = 200,
     ):
-        if not await self._is_safe_http_url(url, host_allowlist=host_allowlist):
-            logger.warning("截图 URL 被拦截（不安全）")
-            return None
+        cached = self._screenshot_cache.get(url)
+        if cached is not None and isinstance(cached, bytes):
+            await self._monitor.record_cache_operation(hit=True)
+            data = cached
+        else:
+            await self._monitor.record_cache_operation(hit=False)
+            data = await self._fetch_bytes(
+                url,
+                timeout_ms=timeout_ms,
+                host_allowlist=host_allowlist,
+                max_bytes=max_bytes,
+                max_redirects=max_redirects,
+                retries=retries,
+                retry_base_delay_ms=retry_base_delay_ms,
+            )
+            if data:
+                await self._monitor.record_screenshot_download()
+                self._screenshot_cache.set(url, data)
 
-        data = await self._fetch_bytes(
-            url,
-            timeout_ms=timeout_ms,
-            host_allowlist=host_allowlist,
-            max_bytes=max_bytes,
-            max_redirects=max_redirects,
-            retries=retries,
-            retry_base_delay_ms=retry_base_delay_ms,
-        )
         if not data:
             return None
 
         if enable_noise:
-            noisy = self._add_noise_to_image_bytes(data, strength=noise_strength, ratio=noise_ratio, max_pixels=max_pixels)
+            noisy = await self._add_noise_to_image_bytes(data, strength=noise_strength, ratio=noise_ratio, max_pixels=max_pixels)
             if noisy:
                 img = self._build_image_from_bytes(noisy, suffix=".png")
                 if img is not None:
@@ -442,6 +690,12 @@ class WhatslinkPlugin(Star):
 
     async def _call_api(self, url: str, timeout_ms: int = 10000, retries: int = 1, retry_base_delay_ms: int = 200) -> dict | None:
         """调用 whatslink.info API 并返回 JSON，失败返回 None。"""
+        cached = self._api_cache.get(url)
+        if cached is not None and isinstance(cached, dict):
+            await self._monitor.record_cache_operation(hit=True)
+            return cached
+        await self._monitor.record_cache_operation(hit=False)
+
         session = await self._ensure_session()
         sem = self._ensure_net_semaphore(self._net_limit or 4)
         q = {"url": url}
@@ -452,29 +706,41 @@ class WhatslinkPlugin(Star):
         if retries > 2:
             retries = 2
 
-        for attempt in range(retries + 1):
-            try:
-                async with sem:
+        async def _do_request():
+            async with sem:
+                start_time = time.monotonic()
+                try:
                     async with session.get(API_URL, params=q, timeout=timeout) as resp:
+                        duration = time.monotonic() - start_time
                         if resp.status == 200:
-                            return await resp.json()
+                            data = await resp.json()
+                            if data:
+                                self._api_cache.set(url, data)
+                            await self._monitor.record_api_call(duration, success=True)
+                            return data
                         if 500 <= resp.status <= 599:
-                            pass
+                            await self._monitor.record_api_call(duration, success=False)
+                            raise Exception(f"Server error: {resp.status}")
                         else:
-                            logger.error(f"whatslink.info 返回状态码: {resp.status}")
+                            await self._monitor.record_api_call(duration, success=False)
+                            logger.warning("外部服务请求失败")
                             return None
-            except asyncio.TimeoutError:
-                logger.warning("whatslink.info 请求超时")
-            except aiohttp.ClientError as e:
-                logger.warning(f"whatslink.info 请求出错: {type(e).__name__}")
-            except Exception as e:
-                logger.error(f"whatslink.info 请求出错: {e}")
-                return None
-
-            if attempt < retries:
-                await self._sleep_backoff(attempt, base_delay_ms=retry_base_delay_ms)
-
-        return None
+                except Exception:
+                    duration = time.monotonic() - start_time
+                    await self._monitor.record_api_call(duration, success=False)
+                    raise
+                        
+        try:
+            return await self._retry_manager.execute_with_retry(
+                _do_request,
+                max_retries=retries,
+                base_delay=retry_base_delay_ms / 1000.0,
+                max_delay=5.0,
+                key=f"api_{API_URL}"
+            )
+        except Exception as e:
+            logger.warning("外部服务请求失败")
+            return None
 
     def _parse_config(self, event: AstrMessageEvent) -> dict:
         cfg = self.context.get_config(umo=event.unified_msg_origin)
@@ -498,7 +764,18 @@ class WhatslinkPlugin(Star):
                 return default
                 
         def _get_bool(key: str, default: bool) -> bool:
-            return bool(plugin_cfg.get(key, default))
+            v = plugin_cfg.get(key)
+            if v is None:
+                return default
+            if isinstance(v, bool):
+                return v
+            if isinstance(v, str):
+                v_lower = v.lower().strip()
+                if v_lower in ("true", "1", "yes", "on", "t", "y"):
+                    return True
+                if v_lower in ("false", "0", "no", "off", "f", "n"):
+                    return False
+            return bool(v)
 
         return {
             "timeout": _get_int("timeout", 10000),
@@ -519,6 +796,45 @@ class WhatslinkPlugin(Star):
             "noise_strength": max(1, min(50, _get_int("noiseStrength", 8))),
             "noise_ratio": max(0.002, min(0.05, _get_float("noiseRatio", 0.002))),
         }
+
+    async def _fetch_screenshot_components(self, shots: List[str], cfg: dict) -> List[Image]:
+        if not shots:
+            return []
+            
+        optimal_concurrency = min(
+            cfg["max_concurrent"],
+            len(shots),
+            max(1, len(shots) // 2)
+        )
+        semaphore = asyncio.Semaphore(optimal_concurrency)
+
+        async def process_with_semaphore(url: str):
+            async with semaphore:
+                return await self._make_screenshot_component(
+                    url=url,
+                    timeout_ms=cfg["timeout"],
+                    enable_noise=cfg["noise_screenshot"],
+                    noise_strength=cfg["noise_strength"],
+                    noise_ratio=cfg["noise_ratio"],
+                    host_allowlist=cfg["host_allowlist"],
+                    max_bytes=cfg["max_screenshot_bytes"],
+                    max_redirects=cfg["max_screenshot_redirects"],
+                    max_pixels=cfg["max_screenshot_pixels"],
+                    retries=cfg["request_retries"],
+                    retry_base_delay_ms=cfg["retry_base_delay_ms"],
+                )
+
+        tasks = [process_with_semaphore(u) for u in shots]
+        
+        results = []
+        comps = await asyncio.gather(*tasks, return_exceptions=True)
+        for c in comps:
+            if isinstance(c, Exception):
+                _log_debug(f"截图处理失败: {type(c).__name__}")
+                continue
+            if c is not None:
+                results.append(c)
+        return results
 
     async def _process_magnet(self, magnet: str, cfg: dict, event: AstrMessageEvent) -> MessageEventResult:
         api_ret = await self._call_api(
@@ -557,30 +873,8 @@ class WhatslinkPlugin(Star):
 
         if cfg["use_forward"] and event.get_platform_name() in ("aiocqhttp", "qq", "qq_official", "onebot"):
             content = [Plain(header)]
-            tasks = [
-                self._make_screenshot_component(
-                    url=u,
-                    timeout_ms=cfg["timeout"],
-                    enable_noise=cfg["noise_screenshot"],
-                    noise_strength=cfg["noise_strength"],
-                    noise_ratio=cfg["noise_ratio"],
-                    host_allowlist=cfg["host_allowlist"],
-                    max_bytes=cfg["max_screenshot_bytes"],
-                    max_redirects=cfg["max_screenshot_redirects"],
-                    max_pixels=cfg["max_screenshot_pixels"],
-                    retries=cfg["request_retries"],
-                    retry_base_delay_ms=cfg["retry_base_delay_ms"],
-                )
-                for u in shots
-            ]
-            if tasks:
-                comps = await asyncio.gather(*tasks, return_exceptions=True)
-                for c in comps:
-                    if isinstance(c, Exception):
-                        _log_debug(f"截图处理失败: {type(c).__name__}")
-                        continue
-                    if c is not None:
-                        content.append(c)
+            comps = await self._fetch_screenshot_components(shots, cfg)
+            content.extend(comps)
             node = Node(content=content, name=event.get_sender_name(), uin=str(event.get_sender_id()))
             nodes = Nodes(nodes=[node])
             mer = MessageEventResult()
@@ -588,30 +882,8 @@ class WhatslinkPlugin(Star):
             return mer
 
         mer = MessageEventResult().message(header)
-        tasks = [
-            self._make_screenshot_component(
-                url=u,
-                timeout_ms=cfg["timeout"],
-                enable_noise=cfg["noise_screenshot"],
-                noise_strength=cfg["noise_strength"],
-                noise_ratio=cfg["noise_ratio"],
-                host_allowlist=cfg["host_allowlist"],
-                max_bytes=cfg["max_screenshot_bytes"],
-                max_redirects=cfg["max_screenshot_redirects"],
-                max_pixels=cfg["max_screenshot_pixels"],
-                retries=cfg["request_retries"],
-                retry_base_delay_ms=cfg["retry_base_delay_ms"],
-            )
-            for u in shots
-        ]
-        if tasks:
-            comps = await asyncio.gather(*tasks, return_exceptions=True)
-            for c in comps:
-                if isinstance(c, Exception):
-                    _log_debug(f"截图处理失败: {type(c).__name__}")
-                    continue
-                if c is not None:
-                    mer.chain.append(c)
+        comps = await self._fetch_screenshot_components(shots, cfg)
+        mer.chain.extend(comps)
         return mer
 
     @filter.event_message_type(filter.EventMessageType.ALL)
