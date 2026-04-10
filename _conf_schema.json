@@ -25,7 +25,7 @@
       "noiseScreenshot": {
         "description": "是否对截图进行轻微加噪后再发送",
         "type": "bool",
-        "hint": "需要 Pillow（PIL）；若不可用或平台不支持以 bytes/base64/file 方式发送图片，将自动回退为 URL 图片发送",
+        "hint": "需要 Pillow（PIL）；若不可用仅影响加噪功能，不影响尝试发送原图（截图发送需要平台支持 bytes/base64/file 形式）",
         "default": true
       },
       "noiseStrength": {
@@ -37,7 +37,7 @@
       "noiseRatio": {
         "description": "截图加噪比例",
         "type": "float",
-        "hint": "取值范围 0-0.05；表示随机扰动像素占比，建议 0.001-0.005",
+        "hint": "取值范围 0.002-0.05；表示随机扰动像素占比，建议 0.002-0.005",
         "default": 0.002
       },
       "maxMagnetsPerMessage": {
@@ -49,7 +49,7 @@
       "maxConcurrentRequests": {
         "description": "外部请求并发上限",
         "type": "int",
-        "hint": "默认 4；限制 API 请求与截图下载的并发，降低资源占用",
+        "hint": "默认 4；限制 API 请求与截图下载的并发，降低资源占用；运行中修改可能不会即时生效",
         "default": 4
       },
       "rateLimitCount": {
@@ -67,7 +67,7 @@
       "screenshotHostAllowlist": {
         "description": "截图域名白名单（可选）",
         "type": "string",
-        "hint": "逗号分隔；为空表示不启用白名单，仅做 http/https 与私网/localhost 拦截",
+        "hint": "逗号分隔；支持子域名匹配；即使放行域名，解析到私网/保留地址仍会被拦截",
         "default": ""
       },
       "maxScreenshotsPerMagnet": {
@@ -91,13 +91,13 @@
       "maxScreenshotPixels": {
         "description": "截图像素上限（用于加噪安全保护）",
         "type": "int",
-        "hint": "默认 20000000；超过将跳过加噪并回退为 URL 图片发送",
+        "hint": "默认 20000000；超过将跳过加噪并直接尝试发送原图",
         "default": 20000000
       },
       "requestRetries": {
         "description": "网络请求重试次数",
         "type": "int",
-        "hint": "默认 1；对超时/连接错误/5xx 进行轻量重试（指数退避）",
+        "hint": "默认 1；有效范围 0-2；对超时/连接错误/5xx 进行轻量重试（指数退避）",
         "default": 1
       },
       "requestRetryBaseDelayMs": {

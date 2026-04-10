@@ -6,7 +6,7 @@
 
 _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-3.4%2B-orange.svg)](https://github.com/Soulter/AstrBot)
 
@@ -25,8 +25,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 - **截图预览**: 可配置是否显示由 API 提供的资源截图。
 - **智能发送**:
   - 在 QQ/OneBot 平台下，可配置使用**合并转发**的形式发送，避免长消息刷屏。
-  - 自动引用原始消息进行回复，交互清晰。
-  - 发送“解析中”的提示后**自动撤回**，保持聊天界面整洁。
+  - 解析过程中会发送一条简短提示，便于确认插件已开始处理。
 
 ## 💿 安装
 
@@ -35,6 +34,36 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 ## 📖 使用方法
 
 在任意聊天中发送包含磁力链接的消息即可。插件会自动处理并回复预览信息。
+
+## 🧩 配置示例
+
+在 AstrBot 配置中可通过 `plugin_settings` 配置本插件（示例仅展示相关片段）：
+
+```json
+{
+  "plugin_settings": {
+    "astrbot_plugin_magnetic_link_analysis": {
+      "timeout": 10000,
+      "useForward": true,
+      "showScreenshot": true,
+      "noiseScreenshot": true,
+      "noiseStrength": 8,
+      "noiseRatio": 0.002,
+      "maxMagnetsPerMessage": 3,
+      "maxConcurrentRequests": 4,
+      "rateLimitCount": 10,
+      "rateLimitWindowSec": 60,
+      "screenshotHostAllowlist": "",
+      "maxScreenshotsPerMagnet": 3,
+      "maxScreenshotBytes": 8388608,
+      "maxScreenshotRedirects": 3,
+      "maxScreenshotPixels": 20000000,
+      "requestRetries": 1,
+      "requestRetryBaseDelayMs": 200
+    }
+  }
+}
+```
 
 ## ⚙️ 配置项
 
@@ -45,24 +74,25 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 | `timeout`         | `number`  | `10000` | 请求 API 的超时时间（毫秒）。                            |
 | `useForward`      | `boolean` | `true`  | 在 QQ/OneBot 平台使用合并转发的形式发送结果。                 |
 | `showScreenshot`  | `boolean` | `true`  | 是否在结果中显示资源截图。                                |
-| `noiseScreenshot` | `boolean` | `true`  | 是否对截图进行轻微加噪后再发送，以提高图片发送成功率（需 Pillow，且会自动回退）。 |
+| `noiseScreenshot` | `boolean` | `true`  | 是否对截图进行轻微加噪后再发送（需 Pillow）。                   |
 | `noiseStrength`   | `number`  | `8`     | 截图加噪强度（1-50）。                                |
-| `noiseRatio`      | `number`  | `0.002` | 截图加噪比例（0-0.05），表示随机扰动像素的占比。                  |
-| `maxMagnetsPerMessage` | `number` | `3` | 单条消息最多解析的磁链数量，用于避免长消息触发大量外部请求。 |
-| `maxConcurrentRequests` | `number` | `4` | 外部请求并发上限（API 请求与截图下载）。 |
+| `noiseRatio`      | `number`  | `0.002` | 截图加噪比例（0.002-0.05），表示随机扰动像素的占比（建议 0.002-0.005）。 |
+| `maxMagnetsPerMessage` | `number` | `3` | 单条消息最多解析的磁链数量（1-20），用于避免长消息触发大量外部请求。 |
+| `maxConcurrentRequests` | `number` | `4` | 外部请求并发上限（1-32，API 请求与截图下载）。 |
 | `rateLimitCount` | `number` | `10` | 限流额度（按磁链次数），与 `rateLimitWindowSec` 配合使用。 |
 | `rateLimitWindowSec` | `number` | `60` | 限流窗口（秒），窗口内累计磁链次数超过 `rateLimitCount` 将被限流。 |
-| `screenshotHostAllowlist` | `string` | `""` | 截图域名白名单（逗号分隔，可选）；为空仅做 http/https 与私网/localhost 拦截。 |
-| `maxScreenshotsPerMagnet` | `number` | `3` | 每个磁链最多发送的截图数量；设置为 `0` 表示不发送截图。 |
-| `maxScreenshotBytes` | `number` | `8388608` | 单张截图下载大小上限（字节），用于避免下载超大响应导致内存压力。 |
-| `maxScreenshotRedirects` | `number` | `3` | 截图下载最大重定向次数；每次跳转都会重新做 URL 安全校验。 |
-| `maxScreenshotPixels` | `number` | `20000000` | 截图像素上限（用于加噪安全保护），超过将跳过加噪并回退为 URL 图片发送。 |
-| `requestRetries` | `number` | `1` | 网络请求重试次数（对超时/连接错误/5xx 进行轻量重试）。 |
+| `screenshotHostAllowlist` | `string` | `""` | 截图域名白名单（逗号分隔，可选），支持子域名匹配；即使放行域名，解析到私网/保留地址仍会被拦截。 |
+| `maxScreenshotsPerMagnet` | `number` | `3` | 每个磁链最多发送的截图数量（0-10）；设置为 `0` 表示不发送截图。 |
+| `maxScreenshotBytes` | `number` | `8388608` | 单张截图下载大小上限（字节），有效范围约 64KB-50MB。 |
+| `maxScreenshotRedirects` | `number` | `3` | 截图下载最大重定向次数（0-10）；每次跳转都会重新做 URL 安全校验。 |
+| `maxScreenshotPixels` | `number` | `20000000` | 截图像素上限（用于加噪安全保护），超过将跳过加噪并直接尝试发送原图。 |
+| `requestRetries` | `number` | `1` | 网络请求重试次数（0-2，对超时/连接错误/5xx 进行轻量重试）。 |
 | `requestRetryBaseDelayMs` | `number` | `200` | 重试基础退避延迟（毫秒），实际延迟含指数退避与随机抖动。 |
 
 说明：
 
-- 截图加噪需要运行环境提供 `Pillow`（`PIL`）；若不可用或平台不支持以 bytes/base64/file 形式发送图片，将自动回退为直接发送截图 URL。
+- 截图发送需要平台支持以 bytes/base64/file 形式发送图片；如果运行环境缺少 `Pillow`（`PIL`），仅影响加噪功能，不影响“发送原图”。
+- `maxConcurrentRequests` 会在插件进程启动后首次初始化网络信号量时生效；运行中修改可能不会即时改变并发上限。
 
 ## 📜 免责声明
 

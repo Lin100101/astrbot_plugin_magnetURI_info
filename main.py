@@ -78,6 +78,7 @@ class WhatslinkPlugin(Star):
         self._net_sem: asyncio.Semaphore | None = None
         self._net_limit: int | None = None
         self._rate: dict[str, collections.deque[float]] = {}
+        self._last_rate_cleanup: float = 0.0
 
     async def initialize(self):
         """异步初始化（可选）"""
@@ -98,7 +99,7 @@ class WhatslinkPlugin(Star):
             limit = 1
         if limit > 32:
             limit = 32
-        if self._net_sem is None or self._net_limit != limit:
+        if self._net_sem is None:
             self._net_sem = asyncio.Semaphore(limit)
             self._net_limit = limit
         return self._net_sem
@@ -124,6 +125,18 @@ class WhatslinkPlugin(Star):
             window_sec = 60.0
 
         now = time.monotonic()
+
+        if now - self._last_rate_cleanup > 60.0:
+            self._last_rate_cleanup = now
+            keys_to_remove = []
+            for k, dq_item in self._rate.items():
+                while dq_item and now - dq_item[0] > window_sec:
+                    dq_item.popleft()
+                if not dq_item:
+                    keys_to_remove.append(k)
+            for k in keys_to_remove:
+                self._rate.pop(k, None)
+
         dq = self._rate.get(key)
         if dq is None:
             dq = collections.deque()
@@ -146,7 +159,7 @@ class WhatslinkPlugin(Star):
                 hosts.add(h)
         return hosts or None
 
-    def _is_safe_http_url(self, url: str, host_allowlist: set[str] | None = None) -> bool:
+    async def _is_safe_http_url(self, url: str, host_allowlist: set[str] | None = None) -> bool:
         try:
             p = urllib.parse.urlparse(url)
         except Exception:
@@ -162,19 +175,35 @@ class WhatslinkPlugin(Star):
         if host_allowlist is not None:
             if host not in host_allowlist and not any(host.endswith("." + h) for h in host_allowlist):
                 return False
+                
         try:
             ip = ipaddress.ip_address(host)
-        except Exception:
-            return True
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_multicast
-            or ip.is_reserved
-            or ip.is_unspecified
-        ):
-            return False
+            ips = [ip]
+        except ValueError:
+            try:
+                loop = asyncio.get_running_loop()
+                addr_info = await loop.getaddrinfo(host, None)
+                ips = []
+                for info in addr_info:
+                    try:
+                        ips.append(ipaddress.ip_address(info[4][0]))
+                    except Exception:
+                        pass
+                if not ips:
+                    return False
+            except Exception:
+                return False
+
+        for ip_obj in ips:
+            if (
+                ip_obj.is_private
+                or ip_obj.is_loopback
+                or ip_obj.is_link_local
+                or ip_obj.is_multicast
+                or ip_obj.is_reserved
+                or ip_obj.is_unspecified
+            ):
+                return False
         return True
 
     def _cleanup_tmp_files_from(self, start_index: int):
@@ -286,7 +315,7 @@ class WhatslinkPlugin(Star):
             cur_url = url
             try:
                 for _ in range(max_redirects + 1):
-                    if not self._is_safe_http_url(cur_url, host_allowlist=host_allowlist):
+                    if not await self._is_safe_http_url(cur_url, host_allowlist=host_allowlist):
                         return None
                     async with sem:
                         async with session.get(cur_url, timeout=timeout, allow_redirects=False) as resp:
@@ -382,15 +411,9 @@ class WhatslinkPlugin(Star):
         retries: int = 1,
         retry_base_delay_ms: int = 200,
     ):
-        if not self._is_safe_http_url(url, host_allowlist=host_allowlist):
+        if not await self._is_safe_http_url(url, host_allowlist=host_allowlist):
             logger.warning("截图 URL 被拦截（不安全）")
             return None
-
-        if not enable_noise:
-            return Image.fromURL(url)
-
-        if _first_callable(Image, ["fromBytes", "from_bytes", "fromBase64", "from_base64", "fromFile", "from_file", "fromPath", "from_path"]) is None:
-            return Image.fromURL(url)
 
         data = await self._fetch_bytes(
             url,
@@ -402,28 +425,27 @@ class WhatslinkPlugin(Star):
             retry_base_delay_ms=retry_base_delay_ms,
         )
         if not data:
-            return Image.fromURL(url)
+            return None
 
-        noisy = self._add_noise_to_image_bytes(data, strength=noise_strength, ratio=noise_ratio, max_pixels=max_pixels)
-        if noisy:
-            img = self._build_image_from_bytes(noisy, suffix=".png")
-            if img is not None:
-                return img
+        if enable_noise:
+            noisy = self._add_noise_to_image_bytes(data, strength=noise_strength, ratio=noise_ratio, max_pixels=max_pixels)
+            if noisy:
+                img = self._build_image_from_bytes(noisy, suffix=".png")
+                if img is not None:
+                    return img
 
         img = self._build_image_from_bytes(data, suffix=".png")
         if img is not None:
             return img
 
-        return Image.fromURL(url)
+        return None
 
-    async def _call_api(self, url: str, timeout_ms: int = 10000) -> dict | None:
+    async def _call_api(self, url: str, timeout_ms: int = 10000, retries: int = 1, retry_base_delay_ms: int = 200) -> dict | None:
         """调用 whatslink.info API 并返回 JSON，失败返回 None。"""
         session = await self._ensure_session()
         sem = self._ensure_net_semaphore(self._net_limit or 4)
         q = {"url": url}
         timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000 if timeout_ms else None)
-        retries = int(self._api_retries) if hasattr(self, "_api_retries") else 1
-        retry_base_delay_ms = int(self._retry_base_delay_ms) if hasattr(self, "_retry_base_delay_ms") else 200
 
         if retries < 0:
             retries = 0
@@ -454,6 +476,144 @@ class WhatslinkPlugin(Star):
 
         return None
 
+    def _parse_config(self, event: AstrMessageEvent) -> dict:
+        cfg = self.context.get_config(umo=event.unified_msg_origin)
+        plugin_settings = cfg.get("plugin_settings", {})
+        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
+        if not isinstance(plugin_cfg, dict):
+            plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
+        if not isinstance(plugin_cfg, dict):
+            plugin_cfg = {}
+            
+        def _get_int(key: str, default: int) -> int:
+            try:
+                return int(plugin_cfg.get(key, default))
+            except Exception:
+                return default
+                
+        def _get_float(key: str, default: float) -> float:
+            try:
+                return float(plugin_cfg.get(key, default))
+            except Exception:
+                return default
+                
+        def _get_bool(key: str, default: bool) -> bool:
+            return bool(plugin_cfg.get(key, default))
+
+        return {
+            "timeout": _get_int("timeout", 10000),
+            "use_forward": _get_bool("useForward", True),
+            "show_screenshot": _get_bool("showScreenshot", True),
+            "noise_screenshot": _get_bool("noiseScreenshot", True),
+            "max_magnets": max(1, min(20, _get_int("maxMagnetsPerMessage", 3))),
+            "max_concurrent": _get_int("maxConcurrentRequests", 4),
+            "max_screenshots": max(0, min(10, _get_int("maxScreenshotsPerMagnet", 3))),
+            "max_screenshot_bytes": _get_int("maxScreenshotBytes", 8 * 1024 * 1024),
+            "max_screenshot_redirects": _get_int("maxScreenshotRedirects", 3),
+            "max_screenshot_pixels": _get_int("maxScreenshotPixels", 20_000_000),
+            "request_retries": _get_int("requestRetries", 1),
+            "retry_base_delay_ms": _get_int("requestRetryBaseDelayMs", 200),
+            "rate_limit": _get_int("rateLimitCount", 10),
+            "rate_window": _get_float("rateLimitWindowSec", 60.0),
+            "host_allowlist": self._parse_host_allowlist(plugin_cfg.get("screenshotHostAllowlist")),
+            "noise_strength": max(1, min(50, _get_int("noiseStrength", 8))),
+            "noise_ratio": max(0.002, min(0.05, _get_float("noiseRatio", 0.002))),
+        }
+
+    async def _process_magnet(self, magnet: str, cfg: dict, event: AstrMessageEvent) -> MessageEventResult:
+        api_ret = await self._call_api(
+            magnet, 
+            timeout_ms=cfg["timeout"], 
+            retries=cfg["request_retries"], 
+            retry_base_delay_ms=cfg["retry_base_delay_ms"]
+        )
+        if not api_ret:
+            return MessageEventResult().message(f"解析失败: {magnet}")
+
+        err = api_ret.get("error") or ""
+        if err:
+            return MessageEventResult().message(f"解析失败: {err}")
+
+        name = api_ret.get("name", "未知名称")
+        size = api_ret.get("size")
+        count = api_ret.get("count")
+        screenshots = api_ret.get("screenshots", []) or []
+
+        header = f"名称: {name}\n文件数量: {count}\n总大小: {size} ({_human_readable_size(size)})\n"
+
+        shots: List[str] = []
+        if (
+            cfg["show_screenshot"]
+            and cfg["max_screenshots"] > 0
+            and isinstance(screenshots, list)
+            and len(screenshots) > 0
+        ):
+            for s in screenshots:
+                url = s.get("screenshot")
+                if url:
+                    shots.append(url)
+                if len(shots) >= cfg["max_screenshots"]:
+                    break
+
+        if cfg["use_forward"] and event.get_platform_name() in ("aiocqhttp", "qq", "qq_official", "onebot"):
+            content = [Plain(header)]
+            tasks = [
+                self._make_screenshot_component(
+                    url=u,
+                    timeout_ms=cfg["timeout"],
+                    enable_noise=cfg["noise_screenshot"],
+                    noise_strength=cfg["noise_strength"],
+                    noise_ratio=cfg["noise_ratio"],
+                    host_allowlist=cfg["host_allowlist"],
+                    max_bytes=cfg["max_screenshot_bytes"],
+                    max_redirects=cfg["max_screenshot_redirects"],
+                    max_pixels=cfg["max_screenshot_pixels"],
+                    retries=cfg["request_retries"],
+                    retry_base_delay_ms=cfg["retry_base_delay_ms"],
+                )
+                for u in shots
+            ]
+            if tasks:
+                comps = await asyncio.gather(*tasks, return_exceptions=True)
+                for c in comps:
+                    if isinstance(c, Exception):
+                        _log_debug(f"截图处理失败: {type(c).__name__}")
+                        continue
+                    if c is not None:
+                        content.append(c)
+            node = Node(content=content, name=event.get_sender_name(), uin=str(event.get_sender_id()))
+            nodes = Nodes(nodes=[node])
+            mer = MessageEventResult()
+            mer.chain = [nodes]
+            return mer
+
+        mer = MessageEventResult().message(header)
+        tasks = [
+            self._make_screenshot_component(
+                url=u,
+                timeout_ms=cfg["timeout"],
+                enable_noise=cfg["noise_screenshot"],
+                noise_strength=cfg["noise_strength"],
+                noise_ratio=cfg["noise_ratio"],
+                host_allowlist=cfg["host_allowlist"],
+                max_bytes=cfg["max_screenshot_bytes"],
+                max_redirects=cfg["max_screenshot_redirects"],
+                max_pixels=cfg["max_screenshot_pixels"],
+                retries=cfg["request_retries"],
+                retry_base_delay_ms=cfg["retry_base_delay_ms"],
+            )
+            for u in shots
+        ]
+        if tasks:
+            comps = await asyncio.gather(*tasks, return_exceptions=True)
+            for c in comps:
+                if isinstance(c, Exception):
+                    _log_debug(f"截图处理失败: {type(c).__name__}")
+                    continue
+                if c is not None:
+                    mer.chain.append(c)
+        return mer
+
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，自动识别并解析磁链（magnet:）。
@@ -471,99 +631,20 @@ class WhatslinkPlugin(Star):
         if not magnets:
             return
 
-        # 读取配置：从 AstrBot 全局配置的 plugin_settings 下读取本插件的配置
-        cfg = self.context.get_config(umo=event.unified_msg_origin)
-        plugin_settings = cfg.get("plugin_settings", {})
-        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
-        if not isinstance(plugin_cfg, dict):
-            plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
-        if not isinstance(plugin_cfg, dict):
-            plugin_cfg = {}
-        try:
-            timeout = int(plugin_cfg.get("timeout", 10000))
-        except Exception:
-            timeout = 10000
-        use_forward = bool(plugin_cfg.get("useForward", True))
-        show_screenshot = bool(plugin_cfg.get("showScreenshot", True))
-        noise_screenshot = bool(plugin_cfg.get("noiseScreenshot", True))
-        try:
-            max_magnets = int(plugin_cfg.get("maxMagnetsPerMessage", 3))
-        except Exception:
-            max_magnets = 3
-        if max_magnets < 1:
-            max_magnets = 1
-        if max_magnets > 20:
-            max_magnets = 20
-        magnets = magnets[:max_magnets]
-        try:
-            max_concurrent = int(plugin_cfg.get("maxConcurrentRequests", 4))
-        except Exception:
-            max_concurrent = 4
-        self._ensure_net_semaphore(max_concurrent)
-        try:
-            max_screenshots = int(plugin_cfg.get("maxScreenshotsPerMagnet", 3))
-        except Exception:
-            max_screenshots = 3
-        if max_screenshots < 0:
-            max_screenshots = 0
-        if max_screenshots > 10:
-            max_screenshots = 10
-        try:
-            max_screenshot_bytes = int(plugin_cfg.get("maxScreenshotBytes", 8 * 1024 * 1024))
-        except Exception:
-            max_screenshot_bytes = 8 * 1024 * 1024
-        try:
-            max_screenshot_redirects = int(plugin_cfg.get("maxScreenshotRedirects", 3))
-        except Exception:
-            max_screenshot_redirects = 3
-        try:
-            max_screenshot_pixels = int(plugin_cfg.get("maxScreenshotPixels", 20_000_000))
-        except Exception:
-            max_screenshot_pixels = 20_000_000
-        try:
-            request_retries = int(plugin_cfg.get("requestRetries", 1))
-        except Exception:
-            request_retries = 1
-        try:
-            retry_base_delay_ms = int(plugin_cfg.get("requestRetryBaseDelayMs", 200))
-        except Exception:
-            retry_base_delay_ms = 200
-        self._api_retries = request_retries
-        self._retry_base_delay_ms = retry_base_delay_ms
-        try:
-            rate_limit = int(plugin_cfg.get("rateLimitCount", 10))
-        except Exception:
-            rate_limit = 10
-        try:
-            rate_window = float(plugin_cfg.get("rateLimitWindowSec", 60))
-        except Exception:
-            rate_window = 60.0
-        host_allowlist = self._parse_host_allowlist(plugin_cfg.get("screenshotHostAllowlist"))
+        cfg = self._parse_config(event)
+        
+        magnets = magnets[:cfg["max_magnets"]]
+        
+        self._ensure_net_semaphore(cfg["max_concurrent"])
+        
         rate_key = f"{event.get_platform_name()}:{event.get_sender_id()}"
-        if not self._consume_rate(rate_key, cost=len(magnets), limit=rate_limit, window_sec=rate_window):
+        if not self._consume_rate(rate_key, cost=len(magnets), limit=cfg["rate_limit"], window_sec=cfg["rate_window"]):
             try:
                 yield event.plain_result("请求过于频繁，请稍后再试")
             except Exception:
                 pass
             return
-        try:
-            noise_strength = int(plugin_cfg.get("noiseStrength", 8))
-        except Exception:
-            noise_strength = 8
-        try:
-            noise_ratio = float(plugin_cfg.get("noiseRatio", 0.002))
-        except Exception:
-            noise_ratio = 0.002
-        if noise_strength < 1:
-            noise_strength = 1
-        if noise_strength > 50:
-            noise_strength = 50
-        if noise_ratio <= 0:
-            noise_ratio = 0.002
-        if noise_ratio > 0.05:
-            noise_ratio = 0.05
 
-        # 先发“解析中”的提示（尽量简短）
         try:
             yield event.plain_result("解析磁链中...")
         except Exception:
@@ -573,96 +654,7 @@ class WhatslinkPlugin(Star):
         results_to_send: List[MessageEventResult] = []
 
         try:
-            async def build_result(m: str) -> MessageEventResult:
-                api_ret = await self._call_api(m, timeout_ms=timeout)
-                if not api_ret:
-                    return MessageEventResult().message(f"解析失败: {m}")
-
-                err = api_ret.get("error") or ""
-                if err:
-                    return MessageEventResult().message(f"解析失败: {err}")
-
-                name = api_ret.get("name", "未知名称")
-                size = api_ret.get("size")
-                count = api_ret.get("count")
-                screenshots = api_ret.get("screenshots", []) or []
-
-                header = f"名称: {name}\n文件数量: {count}\n总大小: {size} ({_human_readable_size(size)})\n"
-
-                shots: List[str] = []
-                if (
-                    show_screenshot
-                    and max_screenshots > 0
-                    and isinstance(screenshots, list)
-                    and len(screenshots) > 0
-                ):
-                    for s in screenshots:
-                        url = s.get("screenshot")
-                        if url:
-                            shots.append(url)
-                        if len(shots) >= max_screenshots:
-                            break
-
-                if use_forward and event.get_platform_name() in ("aiocqhttp", "qq", "qq_official", "onebot"):
-                    content = [Plain(header)]
-                    tasks = [
-                        self._make_screenshot_component(
-                            url=u,
-                            timeout_ms=timeout,
-                            enable_noise=noise_screenshot,
-                            noise_strength=noise_strength,
-                            noise_ratio=noise_ratio,
-                            host_allowlist=host_allowlist,
-                            max_bytes=max_screenshot_bytes,
-                            max_redirects=max_screenshot_redirects,
-                            max_pixels=max_screenshot_pixels,
-                            retries=request_retries,
-                            retry_base_delay_ms=retry_base_delay_ms,
-                        )
-                        for u in shots
-                    ]
-                    if tasks:
-                        comps = await asyncio.gather(*tasks, return_exceptions=True)
-                        for c in comps:
-                            if isinstance(c, Exception):
-                                _log_debug(f"截图处理失败: {type(c).__name__}")
-                                continue
-                            if c is not None:
-                                content.append(c)
-                    node = Node(content=content, name=event.get_sender_name(), uin=str(event.get_sender_id()))
-                    nodes = Nodes(nodes=[node])
-                    mer = MessageEventResult()
-                    mer.chain = [nodes]
-                    return mer
-
-                mer = MessageEventResult().message(header)
-                tasks = [
-                    self._make_screenshot_component(
-                        url=u,
-                        timeout_ms=timeout,
-                        enable_noise=noise_screenshot,
-                        noise_strength=noise_strength,
-                        noise_ratio=noise_ratio,
-                        host_allowlist=host_allowlist,
-                        max_bytes=max_screenshot_bytes,
-                        max_redirects=max_screenshot_redirects,
-                        max_pixels=max_screenshot_pixels,
-                        retries=request_retries,
-                        retry_base_delay_ms=retry_base_delay_ms,
-                    )
-                    for u in shots
-                ]
-                if tasks:
-                    comps = await asyncio.gather(*tasks, return_exceptions=True)
-                    for c in comps:
-                        if isinstance(c, Exception):
-                            _log_debug(f"截图处理失败: {type(c).__name__}")
-                            continue
-                        if c is not None:
-                            mer.chain.append(c)
-                return mer
-
-            tasks = [build_result(m) for m in magnets]
+            tasks = [self._process_magnet(m, cfg, event) for m in magnets]
             if tasks:
                 built = await asyncio.gather(*tasks, return_exceptions=True)
                 for r in built:
