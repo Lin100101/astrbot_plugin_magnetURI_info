@@ -3,4 +3,4 @@ display_name: 更好的磁链解析
 desc: "更快，成功率更高，无需指令即可自动识别聊天中的 magnet 链接，生成预览消息（名称、文件数、大小，可选截图）"
 version: v2.0.0
 author: Lin100101
-repo: https://github.com/Lin100101/astrbot_plugin_magnetic_info
+repo: https://github.com/Lin100101/astrbot_plugin_magnet_info
