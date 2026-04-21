@@ -42,7 +42,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 ```json
 {
   "plugin_settings": {
-    "astrbot_plugin_magnet_info": {
+    "astrbot_plugin_magnetURI_info": {
       "timeout": 10000,
       "useForward": true,
       "showScreenshot": true,
