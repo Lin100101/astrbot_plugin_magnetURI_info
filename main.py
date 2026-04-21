@@ -39,60 +39,52 @@ MAGNET_RE = re.compile(
 API_URL = "https://whatslink.info/api/v1/link"
 BTIH_MD5_LENGTH = 32
 BTIH_SHA1_LENGTH = 40
-BTIH_RAW_MIN_LEN = 16
-BTIH_RAW_MAX_LEN = 160
-MAGNET_MIN_COMPACT_LEN = 10
 
 
-def _normalize_magnet_candidate(raw: str) -> str | None:
+def _normalize_magnet_candidate(raw: str) -> Optional[str]:
     if not raw:
         return None
-
-    m = re.search(
-        rf"urn:btih:([A-Za-z0-9%._\s-]{{{BTIH_RAW_MIN_LEN},{BTIH_RAW_MAX_LEN}}})",
-        raw,
-        re.IGNORECASE,
-    )
+    m = re.search(r"urn:btih:([A-Za-z0-9\-\._% \t\r\n]{32,100})", raw, re.IGNORECASE)
     if not m:
         return None
-
-    clean_hash = re.sub(r"[^A-Za-z0-9]", "", m.group(1))
-    if len(clean_hash) not in (BTIH_MD5_LENGTH, BTIH_SHA1_LENGTH):
+    raw_hash_part = m.group(1)
+    clean_hash = re.sub(r"[^A-Za-z0-9]", "", raw_hash_part)
+    if len(clean_hash) not in (32, 40):
         return None
-
-    hash_start, hash_end = m.span(1)
-    rebuilt = f"{raw[:hash_start]}{clean_hash}{raw[hash_end:]}"
-    normalized = re.sub(r"\s+", "", rebuilt)
-    if not re.match(r"^magnet:\?.*urn:btih:", normalized, re.IGNORECASE):
-        return None
-    return normalized
+    rebuilt = re.sub(r"urn:btih:[A-Za-z0-9\-\._% \t\r\n]{32,100}", f"urn:btih:{clean_hash}", raw, flags=re.IGNORECASE)
+    rebuilt = re.sub(r"\s+", "", rebuilt)
+    if not rebuilt.lower().startswith("magnet:"):
+        if "magnet:" in raw.lower():
+            idx = raw.lower().find("magnet:")
+            suffix = rebuilt[idx + len("magnet:") :] if idx != -1 else rebuilt
+            rebuilt = "magnet:" + suffix
+        else:
+            rebuilt = f"magnet:?xt=urn:btih:{clean_hash}"
+    return rebuilt
 
 
 def extract_magnets(text: str, max_len: int = 200) -> list[str]:
     if not text:
         return []
-
     found: list[str] = []
     seen: set[str] = set()
-
     for m in re.finditer(r"magnet:", text, re.IGNORECASE):
-        chunk = text[m.start() : m.start() + max_len]
+        start = m.start()
+        chunk = text[start : start + max_len]
         candidates: list[str] = []
-        short = re.match(
-            rf"magnet:[A-Za-z0-9:?&=._%+\-/]{{{MAGNET_MIN_COMPACT_LEN},}}",
-            chunk,
-            re.IGNORECASE,
-        )
-        if short:
-            candidates.append(short.group(0))
+        cont_match = re.match(r"magnet:[^\s]{10,}", chunk, re.IGNORECASE)
+        if cont_match:
+            candidates.append(cont_match.group(0))
         candidates.append(chunk)
-
         for cand in candidates:
             norm = _normalize_magnet_candidate(cand)
             if norm and norm not in seen:
                 seen.add(norm)
                 found.append(norm)
-
+    for nm in MAGNET_RE.findall(text):
+        if nm not in seen:
+            seen.add(nm)
+            found.append(nm)
     return found
 
 
@@ -309,7 +301,7 @@ class PerformanceMonitor:
             'uptime_hours': (datetime.now() - self.metrics['start_time']).total_seconds() / 3600
         }
 
-@register("astrbot_plugin_magnetic_link_analysis", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
+@register("astrbot_plugin_magnetURI_info", "anonymous", "磁链解析插件（whatslink.info）", "1.0.0")
 class WhatslinkPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -802,7 +794,7 @@ class WhatslinkPlugin(Star):
     def _parse_config(self, event: AstrMessageEvent) -> dict:
         cfg = self.context.get_config(umo=event.unified_msg_origin)
         plugin_settings = cfg.get("plugin_settings", {})
-        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
+        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetURI_info")
         if not isinstance(plugin_cfg, dict):
             plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
         if not isinstance(plugin_cfg, dict):
