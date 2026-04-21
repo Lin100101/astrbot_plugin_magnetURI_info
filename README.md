@@ -29,7 +29,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 
 ## 💿 安装
 
-在 AstrBot 插件市场搜索 `astrbot_plugin_magnetic_link_analysis` 并安装。
+在 AstrBot 插件市场搜索 `astrbot_plugin_magnet_info` 并安装。
 
 ## 📖 使用方法
 
@@ -42,7 +42,7 @@ _✨ [astrbot](https://github.com/AstrBotDevs/AstrBot) 磁链解析插件 ✨_
 ```json
 {
   "plugin_settings": {
-    "astrbot_plugin_magnetic_link_analysis": {
+    "astrbot_plugin_magnet_info": {
       "timeout": 10000,
       "useForward": true,
       "showScreenshot": true,
