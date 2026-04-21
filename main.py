@@ -39,6 +39,47 @@ MAGNET_RE = re.compile(
 API_URL = "https://whatslink.info/api/v1/link"
 
 
+def _normalize_magnet_candidate(raw: str) -> str | None:
+    if not raw:
+        return None
+
+    m = re.search(r"urn:btih:([A-Za-z0-9%._\-\s]{16,160})", raw, re.IGNORECASE)
+    if not m:
+        return None
+
+    clean_hash = re.sub(r"[^A-Za-z0-9]", "", m.group(1))
+    if len(clean_hash) not in (32, 40):
+        return None
+
+    hash_start, hash_end = m.span(1)
+    rebuilt = f"{raw[:hash_start]}{clean_hash}{raw[hash_end:]}"
+    return re.sub(r"\s+", "", rebuilt)
+
+
+def extract_magnets(text: str, max_len: int = 200) -> list[str]:
+    if not text:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for m in re.finditer(r"magnet:", text, re.IGNORECASE):
+        chunk = text[m.start() : m.start() + max_len]
+        candidates: list[str] = []
+        short = re.match(r"magnet:[^\s]{10,}", chunk, re.IGNORECASE)
+        if short:
+            candidates.append(short.group(0))
+        candidates.append(chunk)
+
+        for cand in candidates:
+            norm = _normalize_magnet_candidate(cand)
+            if norm and norm not in seen:
+                seen.add(norm)
+                found.append(norm)
+
+    return found
+
+
 def _human_readable_size(num: int) -> str:
     """将字节数格式化为人类可读的字符串（中文单位）。"""
     if num is None:
@@ -899,7 +940,7 @@ class WhatslinkPlugin(Star):
         if not text:
             return
 
-        magnets = MAGNET_RE.findall(text)
+        magnets = extract_magnets(text)
         if not magnets:
             return
 
