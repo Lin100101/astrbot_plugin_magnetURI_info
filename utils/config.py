@@ -19,7 +19,7 @@ class ConfigManager:
     def parse_config(self, event: AstrMessageEvent) -> dict:
         cfg = self.context.get_config(umo=event.unified_msg_origin)
         plugin_settings = cfg.get("plugin_settings", {})
-        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetic_link_analysis")
+        plugin_cfg = plugin_settings.get("astrbot_plugin_magnetURI_info")
         if not isinstance(plugin_cfg, dict):
             plugin_cfg = plugin_settings.get("astrbot_plugin_whatslinkInfo", {})
         if not isinstance(plugin_cfg, dict):
