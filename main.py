@@ -49,7 +49,7 @@ def _normalize_magnet_candidate(raw: str) -> str | None:
         return None
 
     m = re.search(
-        rf"urn:btih:([A-Za-z0-9%._\-\s]{{{BTIH_RAW_MIN_LEN},{BTIH_RAW_MAX_LEN}}})",
+        rf"urn:btih:([A-Za-z0-9%._\s-]{{{BTIH_RAW_MIN_LEN},{BTIH_RAW_MAX_LEN}}})",
         raw,
         re.IGNORECASE,
     )
@@ -62,7 +62,10 @@ def _normalize_magnet_candidate(raw: str) -> str | None:
 
     hash_start, hash_end = m.span(1)
     rebuilt = f"{raw[:hash_start]}{clean_hash}{raw[hash_end:]}"
-    return re.sub(r"\s+", "", rebuilt)
+    normalized = re.sub(r"\s+", "", rebuilt)
+    if not re.match(r"^magnet:\?.*urn:btih:", normalized, re.IGNORECASE):
+        return None
+    return normalized
 
 
 def extract_magnets(text: str, max_len: int = 200) -> list[str]:
@@ -75,7 +78,11 @@ def extract_magnets(text: str, max_len: int = 200) -> list[str]:
     for m in re.finditer(r"magnet:", text, re.IGNORECASE):
         chunk = text[m.start() : m.start() + max_len]
         candidates: list[str] = []
-        short = re.match(rf"magnet:[^\s]{{{MAGNET_MIN_COMPACT_LEN},}}", chunk, re.IGNORECASE)
+        short = re.match(
+            rf"magnet:[A-Za-z0-9:?&=._%+\-/]{{{MAGNET_MIN_COMPACT_LEN},}}",
+            chunk,
+            re.IGNORECASE,
+        )
         if short:
             candidates.append(short.group(0))
         candidates.append(chunk)
