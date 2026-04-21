@@ -37,6 +37,63 @@ MAGNET_RE = re.compile(
     re.IGNORECASE,
 )
 API_URL = "https://whatslink.info/api/v1/link"
+BTIH_MD5_LENGTH = 32
+BTIH_SHA1_LENGTH = 40
+BTIH_RAW_MIN_LEN = 16
+BTIH_RAW_MAX_LEN = 160
+MAGNET_MIN_COMPACT_LEN = 10
+
+
+def _normalize_magnet_candidate(raw: str) -> str | None:
+    if not raw:
+        return None
+
+    m = re.search(
+        rf"urn:btih:([A-Za-z0-9%._\s-]{{{BTIH_RAW_MIN_LEN},{BTIH_RAW_MAX_LEN}}})",
+        raw,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    clean_hash = re.sub(r"[^A-Za-z0-9]", "", m.group(1))
+    if len(clean_hash) not in (BTIH_MD5_LENGTH, BTIH_SHA1_LENGTH):
+        return None
+
+    hash_start, hash_end = m.span(1)
+    rebuilt = f"{raw[:hash_start]}{clean_hash}{raw[hash_end:]}"
+    normalized = re.sub(r"\s+", "", rebuilt)
+    if not re.match(r"^magnet:\?.*urn:btih:", normalized, re.IGNORECASE):
+        return None
+    return normalized
+
+
+def extract_magnets(text: str, max_len: int = 200) -> list[str]:
+    if not text:
+        return []
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    for m in re.finditer(r"magnet:", text, re.IGNORECASE):
+        chunk = text[m.start() : m.start() + max_len]
+        candidates: list[str] = []
+        short = re.match(
+            rf"magnet:[A-Za-z0-9:?&=._%+\-/]{{{MAGNET_MIN_COMPACT_LEN},}}",
+            chunk,
+            re.IGNORECASE,
+        )
+        if short:
+            candidates.append(short.group(0))
+        candidates.append(chunk)
+
+        for cand in candidates:
+            norm = _normalize_magnet_candidate(cand)
+            if norm and norm not in seen:
+                seen.add(norm)
+                found.append(norm)
+
+    return found
 
 
 def _human_readable_size(num: int) -> str:
@@ -899,7 +956,7 @@ class WhatslinkPlugin(Star):
         if not text:
             return
 
-        magnets = MAGNET_RE.findall(text)
+        magnets = extract_magnets(text)
         if not magnets:
             return
 
